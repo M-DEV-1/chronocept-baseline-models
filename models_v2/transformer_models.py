@@ -631,19 +631,24 @@ class DistilBERTRegression(BaseTransformerModel):
                 all_predictions.append(predictions.cpu())
                 all_targets.append(targets)
         
-        predictions = torch.cat(all_predictions, dim=0).numpy()
-        targets = torch.cat(all_targets, dim=0).numpy()
-        
-        # Compute metrics
-        from utils.metrics import evaluate_model
-        mse, mae, r2, nll, crps, pearson, spearman = evaluate_model(targets, predictions)
-        
-        return {
-            'mse': mse,
-            'mae': mae,
-            'r2': r2,
-            'nll': nll,
-            'crps': crps,
-            'pearson': pearson,
-            'spearman': spearman
-        }
+        preds = torch.cat(all_predictions, dim=0)
+        targs = torch.cat(all_targets, dim=0)
+
+        if self.loss_type == "param_gauss":
+            mu_xi = preds[:, 0]
+            mu_logw = preds[:, 2]
+            mu_alphat = preds[:, 4]
+            alpha_bound = getattr(self.loss_fn, 'alpha_bound', 5.0)
+            xi_pred = mu_xi
+            omega_pred = torch.exp(mu_logw)
+            alpha_pred = alpha_bound * torch.tanh(mu_alphat)
+            predictions_np = torch.stack([xi_pred, omega_pred, alpha_pred], dim=1).cpu().numpy()
+        else:
+            predictions_np = preds.cpu().numpy()
+
+        targets_np = targs.numpy()
+
+        from utils_v2.metrics import evaluate_model_comprehensive
+        metrics = evaluate_model_comprehensive(predictions_np, targets_np, 
+                                               loss_type=("skew_normal" if self.loss_type=="skew_normal" else ("gaussian" if self.loss_type=="gaussian" else "mse")))
+        return metrics
