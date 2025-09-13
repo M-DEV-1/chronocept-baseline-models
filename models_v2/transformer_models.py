@@ -634,7 +634,7 @@ class DistilBERTRegression(BaseTransformerModel):
         preds = torch.cat(all_predictions, dim=0)
         targs = torch.cat(all_targets, dim=0)
 
-        if self.loss_type == "param_gauss": #Fixed Eval
+        if self.loss_type == "param_gauss": #Fixed Eval Bug with DistilBERT
             mu_xi = preds[:, 0]
             mu_logw = preds[:, 2]
             mu_alphat = preds[:, 4]
