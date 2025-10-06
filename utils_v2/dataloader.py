@@ -32,13 +32,13 @@ class ChronoceptDataset(Dataset):
         # Extract axes data
         axes_data = sample.get("axes", {})
         
-        # Extract targets - map from dataset keys to model keys
+        # Extract targets - ensure the expected keys: xi, omega, alpha
         target_values = sample.get("target_values", {})
-        targets = np.array([
-            target_values.get("location", 0.0),  # xi
-            target_values.get("scale", 1.0),     # omega  
-            target_values.get("skewness", 0.0)   # alpha
-        ])
+        # Some datasets may use alternate names; map them conservatively
+        xi = target_values.get("xi", target_values.get("location", 0.0))
+        omega = target_values.get("omega", target_values.get("scale", 1.0))
+        alpha = target_values.get("alpha", target_values.get("skewness", 0.0))
+        targets = np.array([xi, omega, alpha], dtype=np.float32)
         
         return {
             'texts': parent_text,

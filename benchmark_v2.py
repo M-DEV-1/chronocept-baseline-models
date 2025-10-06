@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Dict, Any, List
 import json
 from datetime import datetime
+import numpy as np
+import torch
 
 # Import our new models
 from models_v2 import (
@@ -76,9 +78,9 @@ class BenchmarkRunner:
                     "loss_type": "skew_normal"
                 },
                 "training": {
-                    "epochs": 50,
+                    "epochs": 100,
                     "lr": 1e-3,
-                    "warm_start_epochs": 0
+                    "warm_start_epochs": 5
                 }
             },
             
@@ -93,9 +95,9 @@ class BenchmarkRunner:
                     "loss_type": "skew_normal"
                 },
                 "training": {
-                    "epochs": 50,
+                    "epochs": 100,
                     "lr": 1e-3,
-                    "warm_start_epochs": 0
+                    "warm_start_epochs": 5
                 }
             },
             
@@ -111,9 +113,25 @@ class BenchmarkRunner:
                     "dropout": 0.1
                 },
                 "training": {
-                    "epochs": 10,
+                    "epochs": 100,
                     "lr": 1e-5,
-                    "warm_start_epochs": 3
+                    "warm_start_epochs": 5
+                }
+            },
+            "roberta_param": {
+                "model_class": RoBERTaRegression,
+                "params": {
+                    "model_name": "roberta-base",
+                    "pooling_type": "mean",
+                    "head_type": "linear",
+                    "axis_encoding": "single_sequence_markers",
+                    "loss_type": "param_gauss",
+                    "dropout": 0.1
+                },
+                "training": {
+                    "epochs": 100,
+                    "lr": 1e-5,
+                    "warm_start_epochs": 5
                 }
             },
             
@@ -129,9 +147,25 @@ class BenchmarkRunner:
                     "dropout": 0.1
                 },
                 "training": {
-                    "epochs": 10,
+                    "epochs": 100,
                     "lr": 1e-5,
-                    "warm_start_epochs": 3
+                    "warm_start_epochs": 5
+                }
+            },
+            "deberta_param": {
+                "model_class": DeBERTaRegression,
+                "params": {
+                    "model_name": "microsoft/deberta-v3-base",
+                    "pooling_type": "mean",
+                    "head_type": "linear",
+                    "axis_encoding": "single_sequence_markers",
+                    "loss_type": "param_gauss",
+                    "dropout": 0.1
+                },
+                "training": {
+                    "epochs": 100,
+                    "lr": 1e-5,
+                    "warm_start_epochs": 5
                 }
             },
             
@@ -146,9 +180,9 @@ class BenchmarkRunner:
                     "dropout": 0.1
                 },
                 "training": {
-                    "epochs": 10,
+                    "epochs": 100,
                     "lr": 1e-5,
-                    "warm_start_epochs": 3
+                    "warm_start_epochs": 5
                 }
             },
             
@@ -164,9 +198,25 @@ class BenchmarkRunner:
                     "dropout": 0.1
                 },
                 "training": {
-                    "epochs": 15,
+                    "epochs": 100,
                     "lr": 2e-5,
-                    "warm_start_epochs": 3
+                    "warm_start_epochs": 5
+                }
+            },
+            "distilbert_param": {
+                "model_class": DistilBERTRegression,
+                "params": {
+                    "model_name": "distilbert-base-uncased",
+                    "pooling_type": "mean",
+                    "head_type": "linear",
+                    "axis_encoding": "single_sequence_markers",
+                    "loss_type": "param_gauss",
+                    "dropout": 0.1
+                },
+                "training": {
+                    "epochs": 100,
+                    "lr": 2e-5,
+                    "warm_start_epochs": 5
                 }
             },
             
@@ -182,9 +232,25 @@ class BenchmarkRunner:
                     "hidden_dim": 256
                 },
                 "training": {
-                    "epochs": 15,
+                    "epochs": 100,
                     "lr": 1e-5,
-                    "warm_start_epochs": 3
+                    "warm_start_epochs": 5
+                }
+            },
+            "mtdnn_param": {
+                "model_class": MTDNNModel,
+                "params": {
+                    "model_name": "roberta-base",
+                    "pooling_type": "mean",
+                    "axis_encoding": "single_sequence_markers",
+                    "loss_type": "param_gauss",
+                    "dropout": 0.1,
+                    "hidden_dim": 256
+                },
+                "training": {
+                    "epochs": 100,
+                    "lr": 1e-5,
+                    "warm_start_epochs": 5
                 }
             },
             
@@ -264,14 +330,33 @@ class BenchmarkRunner:
                     all_predictions.append(predictions.cpu())
                     all_targets.append(targets)
             
-            predictions = torch.cat(all_predictions, dim=0).numpy()
-            targets = torch.cat(all_targets, dim=0).numpy()
+            preds_tensor = torch.cat(all_predictions, dim=0)
+            targets_tensor = torch.cat(all_targets, dim=0)
+            
+            # If using param_gauss, convert 6-dim outputs to [xi, omega, alpha]
+            if config["params"].get("loss_type", "mse") == "param_gauss":
+                try:
+                    mu_xi = preds_tensor[:, 0]
+                    mu_logw = preds_tensor[:, 2]
+                    mu_alphat = preds_tensor[:, 4]
+                    alpha_bound = getattr(model.loss_fn, 'alpha_bound', 5.0)
+                    xi_pred = mu_xi
+                    omega_pred = torch.exp(mu_logw)
+                    alpha_pred = alpha_bound * torch.tanh(mu_alphat)
+                    predictions = torch.stack([xi_pred, omega_pred, alpha_pred], dim=1).cpu().numpy()
+                except Exception as _:
+                    # Fallback: just move to numpy (may error in metrics if dims mismatch)
+                    predictions = preds_tensor.cpu().numpy()
+            else:
+                predictions = preds_tensor.cpu().numpy()
+            
+            targets = targets_tensor.cpu().numpy()
             
             # Compute comprehensive metrics
-            metrics = evaluate_model_comprehensive(
-                predictions, targets, 
-                loss_type=config["params"].get("loss_type", "mse")
-            )
+            # For param_gauss predictions reduced to [xi, omega, alpha], use skew_normal metrics bucket
+            requested_loss = config["params"].get("loss_type", "mse")
+            eval_bucket = "skew_normal" if requested_loss == "param_gauss" else requested_loss
+            metrics = evaluate_model_comprehensive(predictions, targets, loss_type=eval_bucket)
             
             # Log results
             experiment_logger = ExperimentLogger(training_manager.experiment_dir)
@@ -338,15 +423,36 @@ class BenchmarkRunner:
         results_file = self.save_dir / f"benchmark_results_{self.benchmark}_{timestamp}.json"
         
         # Prepare results for JSON serialization
+        def to_serializable(obj):
+            """Recursively convert numpy/torch to JSON-safe types."""
+            if obj is None:
+                return None
+            if isinstance(obj, (bool, int, float, str)):
+                return obj
+            if isinstance(obj, np.generic):
+                return obj.item()
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if isinstance(obj, torch.Tensor):
+                return to_serializable(obj.detach().cpu().numpy())
+            if isinstance(obj, dict):
+                return {str(k): to_serializable(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [to_serializable(v) for v in obj]
+            try:
+                return float(obj)
+            except Exception:
+                return str(obj)
+
         serializable_results = {}
         for model_name, result in self.results.items():
-            serializable_results[model_name] = {
-                "model_name": result["model_name"],
+            serializable_results[model_name] = to_serializable({
+                "model_name": result.get("model_name"),
                 "training_history": result.get("training_history"),
                 "metrics": result.get("metrics"),
                 "experiment_dir": result.get("experiment_dir"),
-                "error": result.get("error")
-            }
+                "error": result.get("error"),
+            })
         
         with open(results_file, 'w') as f:
             json.dump(serializable_results, f, indent=2)
@@ -359,11 +465,11 @@ class BenchmarkRunner:
             return "No results available"
         
         # Create table header
-        table = "\\n" + "="*100 + "\\n"
-        table += f"BENCHMARK RESULTS - {self.benchmark.upper()}\\n"
-        table += "="*100 + "\\n"
-        table += f"{'Model':<20} {'MSE':<10} {'MAE':<10} {'R²':<10} {'NLL':<10} {'CRPS':<10} {'Spearman':<10}\\n"
-        table += "-"*100 + "\\n"
+        table = "\n" + "="*100 + "\n"
+        table += f"BENCHMARK RESULTS - {self.benchmark.upper()}\n"
+        table += "="*100 + "\n"
+        table += f"{'Model':<20} {'MSE':<10} {'MAE':<10} {'R²':<10} {'NLL':<10} {'CRPS':<10} {'Spearman':<10}" + "\n"
+        table += "-"*100 + "\n"
         
         # Add results for each model
         for model_name, result in self.results.items():

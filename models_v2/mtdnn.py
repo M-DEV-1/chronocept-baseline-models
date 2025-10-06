@@ -13,6 +13,8 @@ from .pooling import MeanPooling, AttentionPooling
 from .heads import MultiTaskHead
 from .losses import SkewNormalNLL, GaussianNLL, MSELoss
 
+from utils_v2.metrics import evaluate_model_comprehensive
+
 logger = logging.getLogger(__name__)
 
 
@@ -263,16 +265,5 @@ class MTDNNModel(BaseTransformerModel):
         predictions = torch.cat(all_predictions, dim=0).numpy()
         targets = torch.cat(all_targets, dim=0).numpy()
         
-        # Compute metrics
-        from utils.metrics import evaluate_model
-        mse, mae, r2, nll, crps, pearson, spearman = evaluate_model(targets, predictions)
-        
-        return {
-            'mse': mse,
-            'mae': mae,
-            'r2': r2,
-            'nll': nll,
-            'crps': crps,
-            'pearson': pearson,
-            'spearman': spearman
-        }
+        metrics = evaluate_model_comprehensive(predictions, targets, loss_type=("skew_normal" if self.loss_type=="skew_normal" else ("gaussian" if self.loss_type=="gaussian" else "mse")))
+        return metrics

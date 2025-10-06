@@ -12,6 +12,8 @@ from .encoders import SBERTEncoder, AxisEncoder
 from .heads import FFNNHead, BiLSTMHead
 from .losses import SkewNormalNLL, GaussianNLL, MSELoss
 
+from utils_v2.metrics import evaluate_model_comprehensive
+
 logger = logging.getLogger(__name__)
 
 
@@ -87,6 +89,8 @@ class SBERTFFNN(BaseModel, nn.Module):
             embeddings = self.axis_encoder.sbert_concat(texts, axes_data, self.encoder)
         else:
             raise ValueError(f"Unknown axis encoding: {self.axis_encoding}")
+        # Ensure embeddings are normal tensors (not inference tensors) for autograd safety
+        embeddings = embeddings.clone().detach()
         
         return self.head(embeddings)
     
@@ -176,19 +180,7 @@ class SBERTFFNN(BaseModel, nn.Module):
         predictions = torch.cat(all_predictions, dim=0).numpy()
         targets = torch.cat(all_targets, dim=0).numpy()
         
-        # Compute metrics
-        from utils.metrics import evaluate_model
-        mse, mae, r2, nll, crps, pearson, spearman = evaluate_model(targets, predictions)
-        
-        return {
-            'mse': mse,
-            'mae': mae,
-            'r2': r2,
-            'nll': nll,
-            'crps': crps,
-            'pearson': pearson,
-            'spearman': spearman
-        }
+        return evaluate_model_comprehensive(predictions, targets, loss_type="skew_normal")
 
 
 class SBERTBiLSTM(BaseModel, nn.Module):
@@ -355,16 +347,4 @@ class SBERTBiLSTM(BaseModel, nn.Module):
         predictions = torch.cat(all_predictions, dim=0).numpy()
         targets = torch.cat(all_targets, dim=0).numpy()
         
-        # Compute metrics
-        from utils.metrics import evaluate_model
-        mse, mae, r2, nll, crps, pearson, spearman = evaluate_model(targets, predictions)
-        
-        return {
-            'mse': mse,
-            'mae': mae,
-            'r2': r2,
-            'nll': nll,
-            'crps': crps,
-            'pearson': pearson,
-            'spearman': spearman
-        }
+        return evaluate_model_comprehensive(predictions, targets, loss_type="skew_normal")

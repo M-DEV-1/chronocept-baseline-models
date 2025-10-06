@@ -175,9 +175,25 @@ class TrainingManager:
     
     def _warm_start_training(self, epochs: int) -> Dict[str, Any]:
         """Warm start training (xi only)."""
-        # Temporarily modify loss to only use xi
+        # Temporarily replace loss with xi-only MSE to avoid shape issues
         original_loss_fn = self.loss_fn
-        self.loss_fn = lambda pred, target: original_loss_fn(pred[:, :1], target[:, :1])
+
+        class XiOnlyLoss(nn.Module):
+            def __init__(self):
+                super().__init__()
+            def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+                # If prediction has 6-dim param_gauss head, use mu_xi at index 0
+                if pred.dim() >= 2 and pred.size(-1) >= 1:
+                    if pred.size(-1) == 6:
+                        xi_pred = pred[:, 0]
+                    else:
+                        xi_pred = pred[:, 0]
+                else:
+                    xi_pred = pred.squeeze(-1)
+                xi_true = target[:, 0]
+                return torch.nn.functional.mse_loss(xi_pred, xi_true)
+
+        self.loss_fn = XiOnlyLoss()
         
         warm_history = {'train_losses': [], 'valid_losses': []}
         
@@ -270,10 +286,13 @@ class TrainingManager:
         axes[1, 1].grid(True)
         
         plt.tight_layout()
+        
+        # Save as both PNG and PDF
         plt.savefig(self.experiment_dir / "training_plots.png", dpi=300, bbox_inches='tight')
+        plt.savefig(self.experiment_dir / "training_plots.pdf", dpi=300, bbox_inches='tight')
         plt.close()
         
-        logger.info(f"Training plots saved to {self.experiment_dir / 'training_plots.png'}")
+        logger.info(f"Training plots saved to {self.experiment_dir / 'training_plots.png'} and .pdf")
 
 
 class ExperimentLogger:
@@ -283,36 +302,79 @@ class ExperimentLogger:
         self.experiment_dir = experiment_dir
         self.results = {}
     
+    @staticmethod
+    def _to_serializable(obj):
+        """Recursively convert numpy/torch types to Python natives for JSON."""
+        try:
+            import numpy as np  # local import to avoid hard dep at module load
+            import torch  # type: ignore
+        except Exception:
+            np = None  # type: ignore
+            torch = None  # type: ignore
+        
+        if obj is None:
+            return None
+        
+        # Basic scalars
+        if isinstance(obj, (bool, int, float, str)):
+            return obj
+        
+        # Numpy scalars/arrays
+        if np is not None:
+            if isinstance(obj, np.generic):
+                return obj.item()
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+        
+        # Torch tensors
+        if torch is not None:
+            if isinstance(obj, torch.Tensor):
+                return ExperimentLogger._to_serializable(obj.detach().cpu().numpy())
+        
+        # Mappings
+        if isinstance(obj, dict):
+            return {str(k): ExperimentLogger._to_serializable(v) for k, v in obj.items()}
+        
+        # Sequences
+        if isinstance(obj, (list, tuple)):
+            return [ExperimentLogger._to_serializable(v) for v in obj]
+        
+        # Fallback to string
+        try:
+            return float(obj)  # try numeric cast
+        except Exception:
+            return str(obj)
+    
     def log_experiment_config(self, config: Dict[str, Any]):
         """Log experiment configuration."""
-        self.results['config'] = config
+        self.results['config'] = self._to_serializable(config)
         config_path = self.experiment_dir / "config.json"
         with open(config_path, 'w') as f:
-            json.dump(config, f, indent=2)
+            json.dump(self.results['config'], f, indent=2)
         logger.info(f"Experiment config saved to {config_path}")
     
     def log_training_results(self, training_history: Dict[str, Any]):
         """Log training results."""
-        self.results['training'] = training_history
+        self.results['training'] = self._to_serializable(training_history)
         training_path = self.experiment_dir / "training_results.json"
         with open(training_path, 'w') as f:
-            json.dump(training_history, f, indent=2)
+            json.dump(self.results['training'], f, indent=2)
         logger.info(f"Training results saved to {training_path}")
     
     def log_evaluation_results(self, metrics: Dict[str, float]):
         """Log evaluation results."""
-        self.results['evaluation'] = metrics
+        self.results['evaluation'] = self._to_serializable(metrics)
         eval_path = self.experiment_dir / "evaluation_results.json"
         with open(eval_path, 'w') as f:
-            json.dump(metrics, f, indent=2)
+            json.dump(self.results['evaluation'], f, indent=2)
         logger.info(f"Evaluation results saved to {eval_path}")
     
     def log_model_info(self, model_info: Dict[str, Any]):
         """Log model information."""
-        self.results['model'] = model_info
+        self.results['model'] = self._to_serializable(model_info)
         model_path = self.experiment_dir / "model_info.json"
         with open(model_path, 'w') as f:
-            json.dump(model_info, f, indent=2)
+            json.dump(self.results['model'], f, indent=2)
         logger.info(f"Model info saved to {model_path}")
     
     def create_summary_report(self):
@@ -320,7 +382,7 @@ class ExperimentLogger:
         summary = {
             'experiment_name': self.experiment_dir.name,
             'timestamp': datetime.now().isoformat(),
-            'results': self.results
+            'results': self._to_serializable(self.results)
         }
         
         summary_path = self.experiment_dir / "summary.json"

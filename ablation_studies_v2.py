@@ -26,6 +26,7 @@ from models_v2 import (
     SBERTFFNN, SBERTBiLSTM
 )
 from utils_v2 import ImprovedDataLoader, TrainingManager, ExperimentLogger
+from utils_v2.dataloader import ChronoceptDataset
 from utils_v2.metrics import evaluate_model_comprehensive
 
 # Set up logging
@@ -424,6 +425,166 @@ class AblationRunner:
         
         return results
     
+    def run_axis_shuffling_ablation(self) -> Dict[str, Any]:
+        """Run ablation study on axis shuffling strategies."""
+        logger.info("Running axis shuffling ablation study...")
+        
+        shuffling_configs = [
+            (False, "No Shuffling"),
+            (True, "Random Axis Shuffling")
+        ]
+        
+        results = {}
+        
+        for shuffle_axes, config_name in shuffling_configs:
+            logger.info(f"Testing axis shuffling: {config_name}")
+            
+            try:
+                # Create data loader with axis shuffling
+                data_loader = ImprovedDataLoader(
+                    benchmark=self.benchmark,
+                    axis_encoding="single_sequence_markers",
+                    batch_size=16,
+                    shuffle=True
+                )
+                
+                # Apply axis shuffling to the dataset if enabled
+                if shuffle_axes:
+                    data_loader = self._apply_axis_shuffling(data_loader)
+                
+                train_loader, valid_loader, test_loader = data_loader.get_data_loaders()
+                
+                # Use RoBERTa as base model
+                model = RoBERTaRegression(
+                    model_name="roberta-base",
+                    pooling_type="mean",
+                    head_type="linear",
+                    axis_encoding="single_sequence_markers",
+                    loss_type="skew_normal",
+                    dropout=0.1
+                )
+                model.to(self.device)
+                
+                # Train model
+                optimizer = model.get_optimizer(1e-5)
+                experiment_name = f"axis_shuffling_{shuffle_axes}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                
+                training_manager = TrainingManager(
+                    model=model,
+                    train_loader=train_loader,
+                    valid_loader=valid_loader,
+                    test_loader=test_loader,
+                    optimizer=optimizer,
+                    loss_fn=model.loss_fn,
+                    device=self.device,
+                    save_dir=str(self.save_dir),
+                    experiment_name=experiment_name
+                )
+                
+                training_history = training_manager.train(epochs=10, warm_start_epochs=3)
+                
+                # Evaluate
+                metrics = self._evaluate_model(model, test_loader)
+                
+                results[f"shuffle_{shuffle_axes}"] = {
+                    "config_name": config_name,
+                    "shuffle_axes": shuffle_axes,
+                    "training_history": training_history,
+                    "metrics": metrics,
+                    "experiment_dir": str(training_manager.experiment_dir)
+                }
+                
+                logger.info(f"Completed axis shuffling: {config_name}")
+                
+            except Exception as e:
+                logger.error(f"Error in axis shuffling {config_name}: {str(e)}")
+                results[f"shuffle_{shuffle_axes}"] = {"error": str(e)}
+        
+        return results
+    
+    def _apply_axis_shuffling(self, data_loader: ImprovedDataLoader) -> ImprovedDataLoader:
+        """Apply random shuffling to axis order in the dataset."""
+        # Create a new dataset with shuffled axes
+        shuffled_train_dataset = self._shuffle_axes_in_dataset(data_loader.train_dataset)
+        shuffled_valid_dataset = self._shuffle_axes_in_dataset(data_loader.valid_dataset)
+        shuffled_test_dataset = self._shuffle_axes_in_dataset(data_loader.test_dataset)
+        
+        # Create new data loaders with shuffled datasets
+        from torch.utils.data import DataLoader
+        
+        train_loader = DataLoader(
+            shuffled_train_dataset,
+            batch_size=data_loader.batch_size,
+            shuffle=data_loader.shuffle,
+            collate_fn=data_loader._collate_fn
+        )
+        
+        valid_loader = DataLoader(
+            shuffled_valid_dataset,
+            batch_size=data_loader.batch_size,
+            shuffle=False,
+            collate_fn=data_loader._collate_fn
+        )
+        
+        test_loader = DataLoader(
+            shuffled_test_dataset,
+            batch_size=data_loader.batch_size,
+            shuffle=False,
+            collate_fn=data_loader._collate_fn
+        )
+        
+        # Create a new data loader object
+        new_data_loader = ImprovedDataLoader(
+            benchmark=data_loader.benchmark,
+            axis_encoding=data_loader.axis_encoding,
+            max_length=data_loader.max_length,
+            batch_size=data_loader.batch_size,
+            shuffle=data_loader.shuffle,
+            normalization=data_loader.normalization,
+            log_scale=data_loader.log_scale
+        )
+        
+        # Replace the data loaders
+        new_data_loader.train_loader = train_loader
+        new_data_loader.valid_loader = valid_loader
+        new_data_loader.test_loader = test_loader
+        
+        return new_data_loader
+    
+    def _shuffle_axes_in_dataset(self, dataset: ChronoceptDataset) -> ChronoceptDataset:
+        """Create a new dataset with shuffled axis order."""
+        import random
+        
+        class ShuffledChronoceptDataset(ChronoceptDataset):
+            def __getitem__(self, idx):
+                sample = self.data[idx]
+                
+                # Extract parent text
+                parent_text = sample["parent_text"]
+                
+                # Extract axes data and shuffle the order
+                axes_data = sample.get("axes", {})
+                if axes_data:
+                    # Convert to list, shuffle, and convert back to dict
+                    axes_items = list(axes_data.items())
+                    random.shuffle(axes_items)
+                    axes_data = dict(axes_items)
+                
+                # Extract targets - ensure the expected keys: xi, omega, alpha
+                target_values = sample.get("target_values", {})
+                xi = target_values.get("xi", target_values.get("location", 0.0))
+                omega = target_values.get("omega", target_values.get("scale", 1.0))
+                alpha = target_values.get("alpha", target_values.get("skewness", 0.0))
+                targets = np.array([xi, omega, alpha], dtype=np.float32)
+                
+                return {
+                    'texts': parent_text,
+                    'axes_data': axes_data,
+                    'targets': torch.tensor(targets, dtype=torch.float32)
+                }
+        
+        return ShuffledChronoceptDataset(dataset.data, dataset.axis_encoding)
+    
     def _evaluate_model(self, model, test_loader) -> Dict[str, float]:
         """Evaluate model and return metrics."""
         model.eval()
@@ -454,7 +615,8 @@ class AblationRunner:
             "objectives": self.run_objective_ablation(),
             "heads": self.run_head_ablation(),
             "pooling": self.run_pooling_ablation(),
-            "training_stability": self.run_training_stability_ablation()
+            "training_stability": self.run_training_stability_ablation(),
+            "axis_shuffling": self.run_axis_shuffling_ablation()
         }
         
         self.results = results
@@ -506,6 +668,8 @@ class AblationRunner:
                 summary += f"{'Pooling':<25} {'MSE':<10} {'MAE':<10} {'R²':<10} {'NLL':<10} {'CRPS':<10}\\n"
             elif ablation_type == "training_stability":
                 summary += f"{'Warm Start':<25} {'MSE':<10} {'MAE':<10} {'R²':<10} {'NLL':<10} {'CRPS':<10}\\n"
+            elif ablation_type == "axis_shuffling":
+                summary += f"{'Shuffling':<25} {'MSE':<10} {'MAE':<10} {'R²':<10} {'NLL':<10} {'CRPS':<10}\\n"
             
             summary += "-" * 60 + "\\n"
             
@@ -531,8 +695,10 @@ def main():
     parser = argparse.ArgumentParser(description="Run Chronocept ablation studies")
     parser.add_argument("--benchmark", choices=["benchmark_1", "benchmark_2"], 
                        default="benchmark_1", help="Which benchmark to run")
-    parser.add_argument("--ablation", choices=["axis_encoding", "objectives", "heads", "pooling", "training_stability", "all"],
-                       default="all", help="Which ablation study to run")
+    parser.add_argument("--ablation", choices=["axis_encoding", "objectives", "heads", "pooling", "training_stability", "axis_shuffling", "all"],
+                       default="all", help="Which single ablation study to run (use --ablations for multiple)")
+    parser.add_argument("--ablations", nargs="+", choices=["axis_encoding", "objectives", "heads", "pooling", "training_stability", "axis_shuffling"],
+                       help="Run multiple ablations in one invocation (space-separated)")
     parser.add_argument("--save_dir", default="ablation_results", help="Directory to save results")
     parser.add_argument("--device", default="auto", help="Device to use (auto, cpu, cuda)")
     
@@ -546,18 +712,36 @@ def main():
     )
     
     # Run ablations
-    if args.ablation == "all":
-        results = runner.run_all_ablations()
-    elif args.ablation == "axis_encoding":
-        results = {"axis_encoding": runner.run_axis_encoding_ablation()}
-    elif args.ablation == "objectives":
-        results = {"objectives": runner.run_objective_ablation()}
-    elif args.ablation == "heads":
-        results = {"heads": runner.run_head_ablation()}
-    elif args.ablation == "pooling":
-        results = {"pooling": runner.run_pooling_ablation()}
-    elif args.ablation == "training_stability":
-        results = {"training_stability": runner.run_training_stability_ablation()}
+    if args.ablations:
+        results = {}
+        for ab in args.ablations:
+            if ab == "axis_encoding":
+                results["axis_encoding"] = runner.run_axis_encoding_ablation()
+            elif ab == "objectives":
+                results["objectives"] = runner.run_objective_ablation()
+            elif ab == "heads":
+                results["heads"] = runner.run_head_ablation()
+            elif ab == "pooling":
+                results["pooling"] = runner.run_pooling_ablation()
+            elif ab == "training_stability":
+                results["training_stability"] = runner.run_training_stability_ablation()
+            elif ab == "axis_shuffling":
+                results["axis_shuffling"] = runner.run_axis_shuffling_ablation()
+    else:
+        if args.ablation == "all":
+            results = runner.run_all_ablations()
+        elif args.ablation == "axis_encoding":
+            results = {"axis_encoding": runner.run_axis_encoding_ablation()}
+        elif args.ablation == "objectives":
+            results = {"objectives": runner.run_objective_ablation()}
+        elif args.ablation == "heads":
+            results = {"heads": runner.run_head_ablation()}
+        elif args.ablation == "pooling":
+            results = {"pooling": runner.run_pooling_ablation()}
+        elif args.ablation == "training_stability":
+            results = {"training_stability": runner.run_training_stability_ablation()}
+        elif args.ablation == "axis_shuffling":
+            results = {"axis_shuffling": runner.run_axis_shuffling_ablation()}
     
     runner.results = results
     runner._save_ablation_results()

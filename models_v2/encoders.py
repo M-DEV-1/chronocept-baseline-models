@@ -82,9 +82,12 @@ class RoBERTaEncoder(BaseEncoder):
         with torch.no_grad():
             outputs = self.model(**encoded)
         
+        # RobertaModel does not provide pooler_output; synthesize CLS pooling for compatibility
+        last_hidden = outputs.last_hidden_state
+        cls_pooled = last_hidden[:, 0, :]
         return {
-            'last_hidden_states': outputs.last_hidden_state,
-            'pooler_output': outputs.pooler_output,
+            'last_hidden_states': last_hidden,
+            'pooler_output': cls_pooled,
             'attention_mask': encoded['attention_mask']
         }
 
@@ -114,9 +117,12 @@ class DeBERTaEncoder(BaseEncoder):
         with torch.no_grad():
             outputs = self.model(**encoded)
         
+        # DebertaV2Model returns BaseModelOutput without pooler_output; synthesize CLS pooling
+        last_hidden = outputs.last_hidden_state
+        cls_pooled = last_hidden[:, 0, :]
         return {
-            'last_hidden_states': outputs.last_hidden_state,
-            'pooler_output': outputs.pooler_output,
+            'last_hidden_states': last_hidden,
+            'pooler_output': cls_pooled,
             'attention_mask': encoded['attention_mask']
         }
 
@@ -146,9 +152,12 @@ class DistilBERTEncoder(BaseEncoder):
         with torch.no_grad():
             outputs = self.model(**encoded)
         
+        # DistilBertModel has no pooler_output; synthesize CLS pooling
+        last_hidden = outputs.last_hidden_state
+        cls_pooled = last_hidden[:, 0, :]
         return {
-            'last_hidden_states': outputs.last_hidden_state,
-            'pooler_output': outputs.pooler_output,
+            'last_hidden_states': last_hidden,
+            'pooler_output': cls_pooled,
             'attention_mask': encoded['attention_mask']
         }
 
